@@ -33,15 +33,15 @@ static boost::log::sources::severity_logger<boost::log::trivial::severity_level>
 };     // namespace Log
 
 
-#define LOG_TRACE(logEvent)  BOOST_LOG_FUNCTION(); BOOST_LOG_SEV(Log::_logger, boost::log::trivial::trace) << logEvent;
+#define SLOG_TRACE(logEvent)  BOOST_LOG_FUNCTION(); BOOST_LOG_SEV(Log::_logger, boost::log::trivial::trace) << logEvent;
 
-#define LOG_DEBUG(logEvent)  BOOST_LOG_FUNCTION(); BOOST_LOG_SEV(Log::_logger, boost::log::trivial::debug) << logEvent;
+#define SLOG_DEBUG(logEvent)  BOOST_LOG_FUNCTION(); BOOST_LOG_SEV(Log::_logger, boost::log::trivial::debug) << logEvent;
 
-#define LOG_INFO(logEvent)   BOOST_LOG_FUNCTION(); BOOST_LOG_SEV(Log::_logger, boost::log::trivial::info) << logEvent;
+#define SLOG_INFO(logEvent)   BOOST_LOG_FUNCTION(); BOOST_LOG_SEV(Log::_logger, boost::log::trivial::info) << logEvent;
 
-#define LOG_WARN(logEvent)   BOOST_LOG_FUNCTION(); BOOST_LOG_SEV(Log::_logger, boost::log::trivial::warning) << logEvent;
+#define SLOG_WARN(logEvent)   BOOST_LOG_FUNCTION(); BOOST_LOG_SEV(Log::_logger, boost::log::trivial::warning) << logEvent;
 
-#define LOG_ERROR(logEvent)  BOOST_LOG_FUNCTION(); BOOST_LOG_SEV(Log::_logger, boost::log::trivial::error) << logEvent;
+#define SLOG_ERROR(logEvent)  BOOST_LOG_FUNCTION(); BOOST_LOG_SEV(Log::_logger, boost::log::trivial::error) << logEvent;
 
-#define LOG_FATAL(logEvent)  BOOST_LOG_FUNCTION(); BOOST_LOG_SEV(Log::_logger, boost::log::trivial::fatal) << logEvent;
+#define SLOG_FATAL(logEvent)  BOOST_LOG_FUNCTION(); BOOST_LOG_SEV(Log::_logger, boost::log::trivial::fatal) << logEvent;
 #endif // IDAS_LOGGER_H

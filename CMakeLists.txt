@@ -7,8 +7,6 @@ find_package(Drogon CONFIG REQUIRED)
 find_package(Boost REQUIRED log)
 
 add_executable(SilencedWebSocket
-log.h
-log.cpp
 server.h
 main.cpp
 )

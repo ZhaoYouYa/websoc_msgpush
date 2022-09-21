@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <deque>
 #include <drogon/HttpAppFramework.h>
+#include <exception>
 #include <functional>
 #include <memory>
 #include <mutex>
@@ -24,13 +25,6 @@
 #include <asio.hpp>
 #include <asio/ts/buffer.hpp>
 #include <asio/ts/internet.hpp>
-#include <drogon/HttpTypes.h>
-#include <drogon/WebSocketConnection.h>
-#include <drogon/WebSocketController.h>
-#include <drogon/utils/FunctionTraits.h>
-#include <tuple>
-#include <unordered_map>
-
 #include <boost/log/attributes.hpp>
 #include <boost/log/attributes/named_scope.hpp>
 #include <boost/log/core.hpp>
@@ -45,11 +39,18 @@
 #include <boost/log/utility/setup/common_attributes.hpp>
 #include <boost/log/utility/setup/console.hpp>
 #include <boost/log/utility/setup/file.hpp>
+#include <drogon/HttpTypes.h>
+#include <drogon/WebSocketConnection.h>
+#include <drogon/WebSocketController.h>
+#include <drogon/utils/FunctionTraits.h>
 #include <fstream>
 #include <iostream>
+#include <regex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
+#include <tuple>
+#include <unordered_map>
 using namespace drogon;
 
 namespace Log {
@@ -154,41 +155,7 @@ class Server;
 class Connection;
 static Server *server{nullptr};
 static void ClearThisConnection(std::shared_ptr<Connection>);
-
-class WebSock : public WebSocketController<WebSock, false> {
-public:
-  WebSock(){};
-
-public:
-  virtual void handleNewMessage(const WebSocketConnectionPtr &, std::string &&,
-                                const WebSocketMessageType &) override{
-      // DO NOTHING
-
-  };
-  virtual void
-  handleNewConnection(const HttpRequestPtr &Request,
-                      const WebSocketConnectionPtr &WebSocPtr) override {
-    auto id = Request->parameters().find("id")->second;
-    _connection[id] = WebSocPtr;
-  };
-  virtual void
-  handleConnectionClosed(const WebSocketConnectionPtr &WebSocPtr) override {
-    std::erase_if(_connection, [&WebSocPtr](auto &it) -> bool {
-      auto const &[key, value] = it;
-      if (value == WebSocPtr) {
-        return true;
-      }
-      return false;
-    });
-  };
-
-  WS_PATH_LIST_BEGIN
-  WS_PATH_ADD("/");
-  WS_PATH_LIST_END
-public:
-  std::unordered_map<std::string, WebSocketConnectionPtr> _connection;
-};
-
+static void NotifyMainThread();
 struct MessageHeader {
   uint32_t _id;
   uint32_t _size{0};
@@ -219,7 +186,11 @@ struct Message {
     return msg;
   }
 };
-
+class Connection;
+struct OwnedMessage {
+  std::shared_ptr<Connection> remote{nullptr};
+  Message msg;
+};
 template <typename T, bool isCanWait> class Queue {
 protected:
   std::mutex _muxQueue;
@@ -270,24 +241,18 @@ public:
     _deqQueue.emplace_back(std::move(it));
 
     if constexpr (isCanWait) {
-      std::unique_lock<std::mutex> ul(_muxBlocking);
       _cvBlocking.notify_one();
     }
   }
 };
 
-class Connection;
-struct OwnedMessage {
-  std::shared_ptr<Connection> remote{nullptr};
-  Message msg;
-};
 class Connection : public std::enable_shared_from_this<Connection> {
-protected:
+public:
   asio::ip::tcp::socket _socket;
   asio::io_context &_asioContext;
-  Queue<std::unique_ptr<Message>, false> _messageOut;
+  Queue<Message *, false> _messageOut;
   std::unique_ptr<Message> _msgTemporaryOut{nullptr};
-  Queue<OwnedMessage, true> &_messageIn;
+  Queue<OwnedMessage, false> &_messageIn;
   Message _msgTemporaryIn;
   char _pwd[6];
   uint32_t _id{0};
@@ -295,7 +260,7 @@ protected:
 
 public:
   Connection(asio::io_context &asioContext, asio::ip::tcp::socket socket,
-             Queue<OwnedMessage, true> &in)
+             Queue<OwnedMessage, false> &in)
       : _socket(std::move(socket)), _asioContext(asioContext), _messageIn(in) {}
 
   virtual ~Connection() {}
@@ -332,9 +297,7 @@ private:
               PostToMainThread(
                   [this]() { ClearThisConnection(this->shared_from_this()); });
             }
-
           } else {
-            // Err occur
             SLOG_WARN(_socket.local_endpoint().address().to_string());
             _socket.close();
             PostToMainThread(
@@ -359,6 +322,7 @@ private:
                       msg.msg = _msgTemporaryIn;
                       msg.remote = this->shared_from_this();
                       _messageIn.push_back(msg);
+                      NotifyMainThread();
                       readMessage();
                     } else {
                       SLOG_WARN(_socket.local_endpoint().address().to_string() +
@@ -381,12 +345,14 @@ private:
           }
         });
   }
+
+public:
   // Thread Safe
   void writeMessage() {
     if (_msgTemporaryOut.get() != nullptr || _messageOut.empty()) {
       return;
     }
-    _msgTemporaryOut = _messageOut.pop_front();
+    _msgTemporaryOut.reset(_messageOut.pop_front());
 
     asio::async_write(
         _socket,
@@ -421,36 +387,138 @@ private:
         });
   }
 };
+class WebSock : public WebSocketController<WebSock, false> {
+public:
+  WebSock(){};
+
+public:
+  virtual void handleNewMessage(const WebSocketConnectionPtr &, std::string &&,
+                                const WebSocketMessageType &) override{
+      // DO NOTHING
+  };
+  virtual void
+  handleNewConnection(const HttpRequestPtr &Request,
+                      const WebSocketConnectionPtr &WebSocPtr) override {
+    auto id = Request->parameters().find("id");
+    if (id != Request->parameters().end()) {
+      _connection[id->second] = WebSocPtr;
+    }
+  };
+  virtual void
+  handleConnectionClosed(const WebSocketConnectionPtr &WebSocPtr) override {
+    std::erase_if(_connection, [&WebSocPtr](auto &it) -> bool {
+      auto const &[key, value] = it;
+      if (value == WebSocPtr) {
+        return true;
+      }
+      return false;
+    });
+  };
+  void sendMessageToWebSocket(const OwnedMessage &msg) {
+    try {
+      std::string info((char *)msg.msg._body.data());
+      std::regex regex_(R"(\$.*?\$)");
+      std::smatch match_;
+      std::string::const_iterator iter_begin = info.cbegin();
+      std::string::const_iterator iter_end = info.cend();
+
+      if (regex_search(iter_begin, iter_end, match_, regex_)) {
+
+        auto backchar = match_[0].str().back();
+        auto frontchar = match_[0].str().front();
+        std::string aim(match_[0]);
+        info.replace(0, aim.length(), "");
+        if (frontchar == '*') {
+          if (backchar == '*') {
+            aim.erase(0);
+            aim.erase(aim.end() - 1);
+
+            for (auto &[key, val] : _connection) {
+              if (key.find(aim) != std::string::npos) {
+                val->send(info);
+              }
+            }
+          } else {
+            aim.erase(0);
+            for (auto &[key, val] : _connection) {
+              if (key.length() < aim.length()) {
+                continue;
+              } else {
+                if (key.substr(0, aim.length()) == aim) {
+                  val->send(info);
+                }
+              }
+            }
+          }
+        } else {
+          if (backchar == '*') {
+            aim.erase(aim.end() - 1);
+            for (auto &[key, val] : _connection) {
+              if (key.length() < aim.length()) {
+                continue;
+              } else {
+                if (key.substr(key.length() - aim.length(), key.length()) ==
+                    aim) {
+                  val->send(info);
+                }
+              }
+            }
+          } else {
+            auto r = _connection.find(aim);
+            if (r != _connection.end()) {
+            }
+            auto &_c = _connection[aim];
+            if (_c) {
+              _connection[aim]->send(info);
+            } else {
+              throw std::invalid_argument("Invalid Aim!");
+            }
+          }
+        }
+      } else {
+        throw std::invalid_argument("Can't find aim fron body!");
+      }
+      auto returnMsg = new Message();
+      returnMsg->_header._id = msg.msg._header._id;
+      *returnMsg << "1";
+      msg.remote->_messageOut.push_back(returnMsg);
+    } catch (std::exception e) {
+      auto returnMsg = new Message();
+      returnMsg->_header._id = msg.msg._header._id;
+      *returnMsg << "0" << e.what();
+      msg.remote->_messageOut.push_back(returnMsg);
+    }
+    msg.remote->writeMessage();
+  }
+  WS_PATH_LIST_BEGIN
+  WS_PATH_ADD("/");
+  WS_PATH_LIST_END
+private:
+  std::unordered_map<std::string, WebSocketConnectionPtr> _connection;
+};
 
 class Server {
 protected:
-  Queue<OwnedMessage, true> _messageIn;
+  Queue<OwnedMessage, false> _messageIn;
   std::vector<std::shared_ptr<Connection>> _connections;
   asio::io_context _asioContext;
   std::thread _threadContext;
   std::thread _threadWebsocket;
   asio::ip::tcp::acceptor _asioAcceptor;
-
   std::shared_ptr<WebSock> _websock{std::make_shared<WebSock>()};
   uint32_t _IDCounter{10000};
-
 public:
   std::deque<std::function<void()>> _task;
   std::condition_variable _cvBlocking;
   std::mutex _muxBlocking;
   std::mutex _muxQueue;
-
 public:
   void postTaskToMainThread(std::function<void()> f) {
     std::scoped_lock lock(_muxQueue);
-    bool isEmpty = _task.empty();
     _task.emplace_back(f);
-    if (isEmpty) {
-      std::unique_lock<std::mutex> ul(_muxBlocking);
-      _cvBlocking.notify_one();
-    }
+    _cvBlocking.notify_one();
   }
-
+  void notifyMainThread() { _cvBlocking.notify_one(); }
 public:
   Server(uint16_t port)
       : _asioAcceptor(_asioContext,
@@ -471,15 +539,18 @@ public:
             .run();
       });
       while (true) {
-        if (_task.empty()) {
-          std::unique_lock<std::mutex> ul(_muxBlocking);
-          _cvBlocking.wait(ul);
-        } else {
-          std::scoped_lock lock(_muxQueue);
-          auto f = _task.front();
-          f();
-          _task.pop_front();
+        while (!_messageIn.empty()) {
+          _websock->sendMessageToWebSocket(_messageIn.pop_front());
         }
+        if (!_task.empty()) {
+          std::scoped_lock lock(_muxQueue);
+          do {
+            _task.front()();
+            _task.pop_front();
+          } while (!_task.empty());
+        }
+        std::unique_lock<std::mutex> ul(_muxBlocking);
+        _cvBlocking.wait(ul);
       }
       return -1;
     } catch (std::exception &e) {
@@ -491,10 +562,6 @@ public:
     _asioAcceptor.async_accept(
         [this](std::error_code ec, asio::ip::tcp::socket socket) {
           if (!ec) {
-
-            std::cout << "Remote Connect Info:" << socket.remote_endpoint()
-                      << std::endl;
-
             _connections.push_back(std::make_shared<Connection>(
                 _asioContext, std::move(socket), _messageIn));
             _connections.back()->startClient(_IDCounter++);
@@ -504,7 +571,6 @@ public:
           waitForClientConnection();
         });
   }
-
   void clearConnection(std::shared_ptr<Connection> it) {
 
     auto isIt = [&it](std::shared_ptr<Connection> &i) {
@@ -514,18 +580,17 @@ public:
       return false;
     };
     auto result = std::find_if(begin(_connections), end(_connections), isIt);
-
     // at runtime C++ don't do any decide!
     if (result != _connections.end()) {
       _connections.erase(result);
     }
   }
 };
-
 static void PostToMainThread(std::function<void()> f) {
   server->postTaskToMainThread(f);
 }
 static void ClearThisConnection(std::shared_ptr<Connection> it) {
   server->clearConnection(it);
 }
+static void NotifyMainThread() { server->notifyMainThread(); }
 } // namespace Silenced

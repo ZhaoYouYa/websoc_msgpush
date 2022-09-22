@@ -7,21 +7,19 @@
 #include <pthread.h>
 #include <thread>
 #include <unordered_map>
+#include <vector>
 
 std::condition_variable v;
 std::mutex m;
+std::vector<int> vi{1,2,3,4,5};
 void f() {
 
-   std::this_thread::sleep_for(std::chrono::seconds(5));
-  std::cout << "Lock" << std::endl;
-  std::unique_lock<std::mutex> ul(m);
-  std::cout << "Lock1" << std::endl;
-  v.wait(ul);
-  std::cout << "Lock3" << std::endl;
-  while (true) {
-    std::cout << 1 << std::endl;
+  for(auto& i : vi) {
+    std::cout<<i<<std::endl;
     std::this_thread::sleep_for(std::chrono::seconds(1));
   }
+
+
 }
 
 
@@ -31,17 +29,18 @@ int a{10};
 };
 int main() {
 
- A* a1 = new A();
- a1->a = 0;
+
 
  
 
 auto t = std::thread(f);
 
+std::this_thread::sleep_for(std::chrono::seconds(2));
+vi.erase(vi.begin()+2);
+
 
 
 t.join();
-v.notify_one();
 
   
 

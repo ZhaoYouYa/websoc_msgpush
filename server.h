@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cassert>
 #include <chrono>
+#include <cstddef>
 #include <cstdint>
 #include <deque>
 #include <drogon/HttpAppFramework.h>
@@ -401,21 +402,23 @@ public:
                       const WebSocketConnectionPtr &WebSocPtr) override {
     auto id = Request->parameters().find("id");
     if (id != Request->parameters().end()) {
+      std::scoped_lock lock(_m);
       _connection[id->second] = WebSocPtr;
     }
   };
   virtual void
   handleConnectionClosed(const WebSocketConnectionPtr &WebSocPtr) override {
-    std::erase_if(_connection, [&WebSocPtr](auto &it) -> bool {
-      auto const &[key, value] = it;
-      if (value == WebSocPtr) {
-        return true;
+    std::scoped_lock lock(_m);
+    for (auto &it : _connection) {
+      if (it.second == WebSocPtr) {
+        _connection.erase(it.first);
+        break;
       }
-      return false;
-    });
+    }
   };
   void sendMessageToWebSocket(const OwnedMessage &msg) {
     try {
+      std::scoped_lock lock(_m);
       std::string info((char *)msg.msg._body.data());
       std::regex regex_(R"(\$.*?\$)");
       std::smatch match_;
@@ -495,6 +498,7 @@ public:
   WS_PATH_LIST_END
 private:
   std::unordered_map<std::string, WebSocketConnectionPtr> _connection;
+  std::mutex _m;
 };
 
 class Server {
@@ -507,11 +511,13 @@ protected:
   asio::ip::tcp::acceptor _asioAcceptor;
   std::shared_ptr<WebSock> _websock{std::make_shared<WebSock>()};
   uint32_t _IDCounter{10000};
+
 public:
   std::deque<std::function<void()>> _task;
   std::condition_variable _cvBlocking;
   std::mutex _muxBlocking;
   std::mutex _muxQueue;
+
 public:
   void postTaskToMainThread(std::function<void()> f) {
     std::scoped_lock lock(_muxQueue);
@@ -519,6 +525,7 @@ public:
     _cvBlocking.notify_one();
   }
   void notifyMainThread() { _cvBlocking.notify_one(); }
+
 public:
   Server(uint16_t port)
       : _asioAcceptor(_asioContext,

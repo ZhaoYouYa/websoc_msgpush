@@ -155,7 +155,7 @@ static void PostToMainThread(std::function<void()> f);
 class Server;
 class Connection;
 static Server *server{nullptr};
-static void ClearThisConnection(std::shared_ptr<Connection>);
+static void ClearThisConnection(std::shared_ptr<Connection> c);
 static void NotifyMainThread();
 struct MessageHeader {
   uint32_t _id;
@@ -283,28 +283,24 @@ public:
 
 private:
   void readValidation() {
-    asio::async_read(
-        _socket, asio::buffer(_pwd, sizeof(_pwd)),
-        [this](std::error_code ec, std::size_t length) {
-          if (!ec) {
-            std::string_view pwd(_pwd);
-            std::cout << "Pwd: " << pwd << std::endl;
-            if (pwd == "zyy123") {
-
-              readMessage();
-            } else {
-              SLOG_WARN(_socket.local_endpoint().address().to_string());
-              _socket.close();
-              PostToMainThread(
-                  [this]() { ClearThisConnection(this->shared_from_this()); });
-            }
-          } else {
-            SLOG_WARN(_socket.local_endpoint().address().to_string());
-            _socket.close();
-            PostToMainThread(
-                [this]() { ClearThisConnection(this->shared_from_this()); });
-          }
-        });
+    asio::async_read(_socket, asio::buffer(_pwd, sizeof(_pwd)),
+                     [this](std::error_code ec, std::size_t length) {
+                       if (!ec) {
+                         std::string_view pwd(_pwd);
+                         if (pwd == "zyy123") {
+                           readMessage();
+                         } else {
+                           SLOG_WARN("pwd err");
+                           _socket.close();
+                           PostToMainThread(
+                               [this]() { ClearThisConnection(this->shared_from_this()); });
+                         }
+                       } else {
+                         SLOG_WARN(ec.message());
+                         _socket.close();
+                         PostToMainThread([this]() { ClearThisConnection(this->shared_from_this()); });
+                       }
+                     });
   }
   void readMessage() {
     asio::async_read(
@@ -313,36 +309,31 @@ private:
           if (!ec) {
             if (_msgTemporaryIn._header._size > 0) {
               _msgTemporaryIn._body.resize(_msgTemporaryIn._header._size);
-              asio::async_read(
-                  _socket,
-                  asio::buffer(_msgTemporaryIn._body.data(),
-                               _msgTemporaryIn._header._size),
-                  [this](std::error_code ec, std::size_t length) {
-                    if (!ec) {
-                      OwnedMessage msg;
-                      msg.msg = _msgTemporaryIn;
-                      msg.remote = this->shared_from_this();
-                      _messageIn.push_back(msg);
-                      NotifyMainThread();
-                      readMessage();
-                    } else {
-                      SLOG_WARN(_socket.local_endpoint().address().to_string() +
-                                ec.message());
-                      _socket.close();
-                      PostToMainThread([this]() {
-                        ClearThisConnection(this->shared_from_this());
-                      });
-                    }
-                  });
+              asio::async_read(_socket,
+                               asio::buffer(_msgTemporaryIn._body.data(),
+                                            _msgTemporaryIn._header._size),
+                               [this](std::error_code ec, std::size_t length) {
+                                 if (!ec) {
+                                   OwnedMessage msg;
+                                   msg.msg = _msgTemporaryIn;
+                                   msg.remote = this->shared_from_this();
+                                   _messageIn.push_back(msg);
+                                   NotifyMainThread();
+                                   readMessage();
+                                 } else {
+                                   SLOG_WARN(ec.message());
+                                   _socket.close();
+                                   PostToMainThread(
+                                       [this]() { ClearThisConnection(this->shared_from_this()); });
+                                 }
+                               });
             } else {
               readMessage();
             }
           } else {
-            SLOG_WARN(_socket.local_endpoint().address().to_string() +
-                      ec.message());
+            SLOG_WARN(ec.message());
             _socket.close();
-            PostToMainThread(
-                [this]() { ClearThisConnection(this->shared_from_this()); });
+            PostToMainThread([this]() { ClearThisConnection(this->shared_from_this()); });
           }
         });
   }
@@ -353,8 +344,8 @@ public:
     if (_msgTemporaryOut.get() != nullptr || _messageOut.empty()) {
       return;
     }
-    _msgTemporaryOut.reset(_messageOut.pop_front());
 
+    _msgTemporaryOut.reset(_messageOut.pop_front());
     asio::async_write(
         _socket,
         asio::buffer(&_msgTemporaryOut->_header, sizeof(MessageHeader)),
@@ -362,27 +353,24 @@ public:
           if (!ec) {
             if (_msgTemporaryOut->_body.size() > 0) {
 
-              asio::async_write(
-                  _socket,
-                  asio::buffer(_msgTemporaryOut->_body.data(),
-                               _msgTemporaryOut->_body.size()),
-                  [this](std::error_code ec, std::size_t length) {
-                    if (!ec) {
-                      _msgTemporaryOut.reset(nullptr);
-                      writeMessage();
-                    } else {
-                      SLOG_WARN(_socket.local_endpoint().address().to_string() +
-                                ec.message());
-                    }
-                  });
+              asio::async_write(_socket,
+                                asio::buffer(_msgTemporaryOut->_body.data(),
+                                             _msgTemporaryOut->_body.size()),
+                                [this](std::error_code ec, std::size_t length) {
+                                  if (!ec) {
+                                    _msgTemporaryOut.reset(nullptr);
+                                    writeMessage();
+                                  } else {
+                                    SLOG_WARN(ec.message());
+                                  }
+                                });
             } else {
               _msgTemporaryOut.reset(nullptr);
               writeMessage();
             }
           } else {
             // write Err
-            SLOG_WARN(_socket.local_endpoint().address().to_string() +
-                      ec.message());
+            SLOG_WARN(ec.message());
             _socket.close();
           }
         });
@@ -393,8 +381,9 @@ public:
   WebSock(){};
 
 public:
-  virtual void handleNewMessage(const WebSocketConnectionPtr &, std::string &&,
+  virtual void handleNewMessage(const WebSocketConnectionPtr &WebPr, std::string && Str,
                                 const WebSocketMessageType &) override{
+                                  //WebPr->send(Str);
       // DO NOTHING
   };
   virtual void
@@ -404,6 +393,7 @@ public:
     if (id != Request->parameters().end()) {
       std::scoped_lock lock(_m);
       _connection[id->second] = WebSocPtr;
+      SLOG_INFO(id->second + " Connected!");
     }
   };
   virtual void
@@ -411,7 +401,9 @@ public:
     std::scoped_lock lock(_m);
     for (auto &it : _connection) {
       if (it.second == WebSocPtr) {
+        SLOG_INFO(it.first + " Disconnected!");
         _connection.erase(it.first);
+
         break;
       }
     }
@@ -426,11 +418,11 @@ public:
       std::string::const_iterator iter_end = info.cend();
 
       if (regex_search(iter_begin, iter_end, match_, regex_)) {
-
-        auto backchar = match_[0].str().back();
-        auto frontchar = match_[0].str().front();
         std::string aim(match_[0]);
         info.replace(0, aim.length(), "");
+        aim = aim.substr(1, aim.length() - 2);
+        auto backchar = aim.back();
+        auto frontchar = aim.front();
         if (frontchar == '*') {
           if (backchar == '*') {
             aim.erase(0);
@@ -466,7 +458,7 @@ public:
                 }
               }
             }
-          } else {
+          } else { // todo
             auto r = _connection.find(aim);
             if (r != _connection.end()) {
             }
@@ -479,7 +471,7 @@ public:
           }
         }
       } else {
-        throw std::invalid_argument("Can't find aim fron body!");
+        throw std::invalid_argument("Can't find aim from body!");
       }
       auto returnMsg = new Message();
       returnMsg->_header._id = msg.msg._header._id;
@@ -488,7 +480,8 @@ public:
     } catch (std::exception e) {
       auto returnMsg = new Message();
       returnMsg->_header._id = msg.msg._header._id;
-      *returnMsg << "0" << e.what();
+      *returnMsg << "0"
+                 << "Err";
       msg.remote->_messageOut.push_back(returnMsg);
     }
     msg.remote->writeMessage();
@@ -591,13 +584,16 @@ public:
     if (result != _connections.end()) {
       _connections.erase(result);
     }
+    SLOG_INFO("An Connection DisConnect,Now Connection Number:"+std::to_string(_connections.size()))
   }
+  void test() { std::cout << "test" << std::endl; }
 };
 static void PostToMainThread(std::function<void()> f) {
   server->postTaskToMainThread(f);
 }
-static void ClearThisConnection(std::shared_ptr<Connection> it) {
-  server->clearConnection(it);
+static void ClearThisConnection(std::shared_ptr<Connection> c) {
+  server->clearConnection(c);
+
 }
 static void NotifyMainThread() { server->notifyMainThread(); }
 } // namespace Silenced

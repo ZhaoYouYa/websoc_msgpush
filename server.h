@@ -11,9 +11,8 @@
 #include <memory>
 #include <mutex>
 #include <optional>
-#include <ostream>
 #include <thread>
-#include <vector>
+
 
 #ifdef _WIN32
 #ifndef _WIN32_WINNT
@@ -26,128 +25,19 @@
 #include <asio.hpp>
 #include <asio/ts/buffer.hpp>
 #include <asio/ts/internet.hpp>
-#include <boost/log/attributes.hpp>
-#include <boost/log/attributes/named_scope.hpp>
-#include <boost/log/core.hpp>
-#include <boost/log/expressions.hpp>
-#include <boost/log/sinks.hpp>
-#include <boost/log/sinks/text_file_backend.hpp>
-#include <boost/log/sources/logger.hpp>
-#include <boost/log/sources/record_ostream.hpp>
-#include <boost/log/sources/severity_logger.hpp>
-#include <boost/log/support/date_time.hpp>
-#include <boost/log/trivial.hpp>
-#include <boost/log/utility/setup/common_attributes.hpp>
-#include <boost/log/utility/setup/console.hpp>
-#include <boost/log/utility/setup/file.hpp>
 #include <drogon/HttpTypes.h>
 #include <drogon/WebSocketConnection.h>
 #include <drogon/WebSocketController.h>
 #include <drogon/utils/FunctionTraits.h>
-#include <fstream>
+#include <filesystem>
+#include <glog/logging.h>
 #include <iostream>
 #include <regex>
 #include <stdexcept>
 #include <string>
 #include <string_view>
-#include <tuple>
 #include <unordered_map>
 using namespace drogon;
-
-namespace Log {
-enum class LogType { Console, File };
-typedef boost::log::sinks::synchronous_sink<
-    boost::log::sinks::text_file_backend>
-    file_sink;
-static boost::log::sources::severity_logger<boost::log::trivial::severity_level>
-    _logger;
-static void Init(LogType type, int level, int maxFileSize = 1024,
-                 int maxBackupIndex = 1) {
-  boost::log::formatter formatter =
-      boost::log::expressions::stream
-      << "["
-      << boost::log::expressions::format_date_time<boost::posix_time::ptime>(
-             "TimeStamp", "%Y-%m-%d %H:%M:%S.%f") /*.%f*/
-      << "|"
-      << boost::log::expressions::attr<
-             boost::log::attributes::current_thread_id::value_type>("ThreadID")
-      << "]["
-      << boost::log::expressions::attr<boost::log::trivial::severity_level>(
-             "Severity")
-      << "]" << boost::log::expressions::smessage << "    "
-      << boost::log::expressions::format_named_scope(
-             "Scope", boost::log::keywords::format = "(%f:%l)",
-             boost::log::keywords::iteration = boost::log::expressions::reverse,
-             boost::log::keywords::depth = 1);
-
-  switch (type) {
-  case LogType::Console: {
-    auto consoleSink = boost::log::add_console_log();
-    consoleSink->set_formatter(formatter);
-    boost::log::core::get()->add_sink(consoleSink);
-  } break;
-  case LogType::File: {
-    boost::shared_ptr<file_sink> fileSink(new file_sink(
-        boost::log::keywords::target_file_name =
-            "%Y%m%d_%H%M%S_%N.log", // file name pattern
-        boost::log::keywords::time_based_rotation =
-            boost::log::sinks::file::rotation_at_time_point(16, 0, 0),
-        boost::log::keywords::rotation_size =
-            maxFileSize * 1024 * 1024, // rotation size, in characters
-        boost::log::keywords::open_mode = std::ios::out | std::ios::app));
-
-    fileSink->locked_backend()->set_file_collector(
-        boost::log::sinks::file::make_collector(
-            boost::log::keywords::target = "logs", // folder name.
-            boost::log::keywords::max_size =
-                maxFileSize * maxBackupIndex * 1024 *
-                1024, // The maximum amount of space of the folder.
-            boost::log::keywords::min_free_space =
-                10 * 1024 * 1024, // Reserved disk space minimum.
-            boost::log::keywords::max_files = 512));
-
-    fileSink->set_formatter(formatter);
-    fileSink->locked_backend()->scan_for_files();
-    fileSink->locked_backend()->auto_flush(true);
-    boost::log::core::get()->add_sink(fileSink);
-  } break;
-  default: {
-    auto consoleSink = boost::log::add_console_log();
-    consoleSink->set_formatter(formatter);
-    boost::log::core::get()->add_sink(consoleSink);
-  } break;
-  }
-  boost::log::add_common_attributes();
-  boost::log::core::get()->add_global_attribute(
-      "Scope", boost::log::attributes::named_scope());
-  boost::log::core::get()->set_filter(boost::log::trivial::severity >= level);
-}
-
-}; // namespace Log
-
-#define SLOG_TRACE(logEvent)                                                   \
-  BOOST_LOG_FUNCTION();                                                        \
-  BOOST_LOG_SEV(Log::_logger, boost::log::trivial::trace) << logEvent;
-
-#define SLOG_DEBUG(logEvent)                                                   \
-  BOOST_LOG_FUNCTION();                                                        \
-  BOOST_LOG_SEV(Log::_logger, boost::log::trivial::debug) << logEvent;
-
-#define SLOG_INFO(logEvent)                                                    \
-  BOOST_LOG_FUNCTION();                                                        \
-  BOOST_LOG_SEV(Log::_logger, boost::log::trivial::info) << logEvent;
-
-#define SLOG_WARN(logEvent)                                                    \
-  BOOST_LOG_FUNCTION();                                                        \
-  BOOST_LOG_SEV(Log::_logger, boost::log::trivial::warning) << logEvent;
-
-#define SLOG_ERROR(logEvent)                                                   \
-  BOOST_LOG_FUNCTION();                                                        \
-  BOOST_LOG_SEV(Log::_logger, boost::log::trivial::error) << logEvent;
-
-#define SLOG_FATAL(logEvent)                                                   \
-  BOOST_LOG_FUNCTION();                                                        \
-  BOOST_LOG_SEV(Log::_logger, boost::log::trivial::fatal) << logEvent;
 
 namespace Silenced {
 
@@ -290,15 +180,18 @@ private:
                          if (pwd == "zyy123") {
                            readMessage();
                          } else {
-                           SLOG_WARN("pwd err");
+                           LOG(WARNING) << "pwd err";
                            _socket.close();
-                           PostToMainThread(
-                               [this]() { ClearThisConnection(this->shared_from_this()); });
+                           PostToMainThread([this]() {
+                             ClearThisConnection(this->shared_from_this());
+                           });
                          }
                        } else {
-                         SLOG_WARN(ec.message());
+                         LOG(WARNING) << ec.message();
                          _socket.close();
-                         PostToMainThread([this]() { ClearThisConnection(this->shared_from_this()); });
+                         PostToMainThread([this]() {
+                           ClearThisConnection(this->shared_from_this());
+                         });
                        }
                      });
   }
@@ -321,19 +214,22 @@ private:
                                    NotifyMainThread();
                                    readMessage();
                                  } else {
-                                   SLOG_WARN(ec.message());
+                                   LOG(WARNING) << ec.message();
                                    _socket.close();
-                                   PostToMainThread(
-                                       [this]() { ClearThisConnection(this->shared_from_this()); });
+                                   PostToMainThread([this]() {
+                                     ClearThisConnection(
+                                         this->shared_from_this());
+                                   });
                                  }
                                });
             } else {
               readMessage();
             }
           } else {
-            SLOG_WARN(ec.message());
+            LOG(WARNING) << ec.message();
             _socket.close();
-            PostToMainThread([this]() { ClearThisConnection(this->shared_from_this()); });
+            PostToMainThread(
+                [this]() { ClearThisConnection(this->shared_from_this()); });
           }
         });
   }
@@ -361,7 +257,7 @@ public:
                                     _msgTemporaryOut.reset(nullptr);
                                     writeMessage();
                                   } else {
-                                    SLOG_WARN(ec.message());
+                                    LOG(WARNING) << ec.message();
                                   }
                                 });
             } else {
@@ -370,7 +266,7 @@ public:
             }
           } else {
             // write Err
-            SLOG_WARN(ec.message());
+            LOG(WARNING) << ec.message();
             _socket.close();
           }
         });
@@ -381,9 +277,10 @@ public:
   WebSock(){};
 
 public:
-  virtual void handleNewMessage(const WebSocketConnectionPtr &WebPr, std::string && Str,
+  virtual void handleNewMessage(const WebSocketConnectionPtr &WebPr,
+                                std::string &&Str,
                                 const WebSocketMessageType &) override{
-                                  //WebPr->send(Str);
+      // WebPr->send(Str);
       // DO NOTHING
   };
   virtual void
@@ -393,7 +290,7 @@ public:
     if (id != Request->parameters().end()) {
       std::scoped_lock lock(_m);
       _connection[id->second] = WebSocPtr;
-      SLOG_INFO(id->second + " Connected!");
+      LOG(INFO) << id->second << " Connected!";
     }
   };
   virtual void
@@ -401,7 +298,7 @@ public:
     std::scoped_lock lock(_m);
     for (auto &it : _connection) {
       if (it.second == WebSocPtr) {
-        SLOG_INFO(it.first + " Disconnected!");
+        LOG(INFO) << it.first << " Disconnected!";
         _connection.erase(it.first);
 
         break;
@@ -554,7 +451,7 @@ public:
       }
       return -1;
     } catch (std::exception &e) {
-      SLOG_WARN(e.what());
+      LOG(WARNING) << e.what();
       return -1;
     }
   }
@@ -566,7 +463,7 @@ public:
                 _asioContext, std::move(socket), _messageIn));
             _connections.back()->startClient(_IDCounter++);
           } else {
-            SLOG_WARN(ec.message());
+            LOG(WARNING) << ec.message();
           }
           waitForClientConnection();
         });
@@ -584,16 +481,15 @@ public:
     if (result != _connections.end()) {
       _connections.erase(result);
     }
-    SLOG_INFO("An Connection DisConnect,Now Connection Number:"+std::to_string(_connections.size()))
+    LOG(INFO) << "An Connection DisConnect,Now Connection Number:"
+              << std::to_string(_connections.size());
   }
-  void test() { std::cout << "test" << std::endl; }
 };
 static void PostToMainThread(std::function<void()> f) {
   server->postTaskToMainThread(f);
 }
 static void ClearThisConnection(std::shared_ptr<Connection> c) {
   server->clearConnection(c);
-
 }
 static void NotifyMainThread() { server->notifyMainThread(); }
 } // namespace Silenced

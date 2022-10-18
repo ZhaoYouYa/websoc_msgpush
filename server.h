@@ -300,7 +300,6 @@ public:
       if (it.second == websoc_ptr) {
         LOG(INFO) << it.first << " Disconnected!";
         _connection.erase(it.first);
-
         break;
       }
     }

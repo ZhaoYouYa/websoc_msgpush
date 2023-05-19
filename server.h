@@ -180,7 +180,7 @@ private:
     asio::async_read(_socket, asio::buffer(_pwd, sizeof(_pwd)),
                      [this](std::error_code ec, std::size_t length) {
                        if (!ec) {
-                         std::string_view pwd(_pwd, 6);
+                         std::string_view pwd(_pwd, sizeof(_pwd));
                          if (pwd == "zyy123") {
                            readMessage();
                          } else {

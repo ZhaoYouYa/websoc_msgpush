@@ -8,11 +8,13 @@
 #include <drogon/HttpAppFramework.h>
 #include <exception>
 #include <functional>
+#include <json/value.h>
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <pstl/glue_algorithm_defs.h>
 #include <thread>
-
+#include <vector>
 
 #ifdef _WIN32
 #ifndef _WIN32_WINNT
@@ -25,6 +27,7 @@
 #include <asio.hpp>
 #include <asio/ts/buffer.hpp>
 #include <asio/ts/internet.hpp>
+#include <drogon/HttpController.h>
 #include <drogon/HttpTypes.h>
 #include <drogon/WebSocketConnection.h>
 #include <drogon/WebSocketController.h>
@@ -54,7 +57,7 @@ struct MessageHeader {
 
 struct Message {
   MessageHeader _header{};
-  std::vector<uint8_t> _body{};
+  std::vector<char> _body{};
   template <typename DataType>
   friend auto &operator<<(Message &msg_, const DataType &data_) {
 
@@ -152,7 +155,8 @@ public:
 public:
   Connection(asio::io_context &asioContext, asio::ip::tcp::socket socket,
              Queue<OwnedMessage, false> &in)
-      : _socket(std::move(socket)), _asio_context(asioContext), _message_in(in) {}
+      : _socket(std::move(socket)), _asio_context(asioContext),
+        _message_in(in) {}
 
   virtual ~Connection() {}
   uint32_t getId() { return _id; }
@@ -176,7 +180,7 @@ private:
     asio::async_read(_socket, asio::buffer(_pwd, sizeof(_pwd)),
                      [this](std::error_code ec, std::size_t length) {
                        if (!ec) {
-                         std::string_view pwd(_pwd);
+                         std::string_view pwd(_pwd, 6);
                          if (pwd == "zyy123") {
                            readMessage();
                          } else {
@@ -279,9 +283,9 @@ public:
 public:
   virtual void handleNewMessage(const WebSocketConnectionPtr &web_ptr_,
                                 std::string &&str_,
-                                const WebSocketMessageType &) override{
-      // WebPr->send(Str);
-      // DO NOTHING
+                                const WebSocketMessageType &) override {
+    web_ptr_->send(str_);
+    // DO NOTHING
   };
   virtual void
   handleNewConnection(const HttpRequestPtr &request_,
@@ -289,16 +293,23 @@ public:
     auto id = request_->parameters().find("id");
     if (id != request_->parameters().end()) {
       std::scoped_lock lock(_m);
-      _connection[id->second] = websoc_str_;
-      LOG(INFO) << id->second << " Connected!";
+      _connection[id->second].push_back(websoc_str_);
     }
   };
   virtual void
   handleConnectionClosed(const WebSocketConnectionPtr &websoc_ptr) override {
     std::scoped_lock lock(_m);
     for (auto &it : _connection) {
-      if (it.second == websoc_ptr) {
-        LOG(INFO) << it.first << " Disconnected!";
+
+      auto e = std::remove_if(it.second.begin(), it.second.end(),
+                              [&websoc_ptr](const WebSocketConnectionPtr &it) {
+                                if (it == websoc_ptr) {
+                                  return true;
+                                }
+                                return false;
+                              });
+      it.second.erase(e, it.second.end());
+      if (it.second.empty()) {
         _connection.erase(it.first);
         break;
       }
@@ -307,65 +318,30 @@ public:
   void sendMessageToWebSocket(const OwnedMessage &msg_) {
     try {
       std::scoped_lock lock(_m);
-      std::string info((char *)msg_._msg._body.data());
+      std::string info(msg_._msg._body.data(), msg_._msg._header._size);
       std::regex regex_(R"(\$.*?\$)");
       std::smatch match_;
       std::string::const_iterator iter_begin = info.cbegin();
       std::string::const_iterator iter_end = info.cend();
-
       if (regex_search(iter_begin, iter_end, match_, regex_)) {
         std::string aim(match_[0]);
         info.replace(0, aim.length(), "");
         aim = aim.substr(1, aim.length() - 2);
         auto backchar = aim.back();
         auto frontchar = aim.front();
-        if (frontchar == '*') {
-          if (backchar == '*') {
-            aim.erase(0);
-            aim.erase(aim.end() - 1);
-
-            for (auto &[key, val] : _connection) {
-              if (key.find(aim) != std::string::npos) {
-                val->send(info);
-              }
-            }
-          } else {
-            aim.erase(0);
-            for (auto &[key, val] : _connection) {
-              if (key.length() < aim.length()) {
-                continue;
-              } else {
-                if (key.substr(0, aim.length()) == aim) {
-                  val->send(info);
-                }
-              }
-            }
-          }
-        } else {
-          if (backchar == '*') {
-            aim.erase(aim.end() - 1);
-            for (auto &[key, val] : _connection) {
-              if (key.length() < aim.length()) {
-                continue;
-              } else {
-                if (key.substr(key.length() - aim.length(), key.length()) ==
-                    aim) {
-                  val->send(info);
-                }
-              }
-            }
-          } else { // todo
-            auto r = _connection.find(aim);
-            if (r != _connection.end()) {
-            }
-            auto &_c = _connection[aim];
-            if (_c) {
-              _connection[aim]->send(info);
-            } else {
-              throw std::invalid_argument("Invalid Aim!");
+        std::regex reg(",");
+        std::sregex_token_iterator pos(aim.begin(), aim.end(), reg, -1);
+        decltype(pos) end;
+        for (; pos != end; ++pos) {
+          std::vector<WebSocketConnectionPtr> &_c = _connection[pos->str()];
+          for (auto &v : _c) {
+            if (v) {
+              v->send(info);
+              // v->send(const std::string &msg)
             }
           }
         }
+
       } else {
         throw std::invalid_argument("Can't find aim from body!");
       }
@@ -382,14 +358,31 @@ public:
     }
     msg_._remote->writeMessage();
   }
+
+  const Json::Value getConnectedInfo() {
+    Json::Value connected_info;
+
+    for (auto &v : _connection) {
+      Json::Value s;
+      s["Id"] = v.first;
+      for (auto &c : v.second) {
+        Json::Value Ip;
+        Ip["Ip"] = c->peerAddr().toIp().c_str();
+        s["Client"].append(Ip);
+      }
+      connected_info.append(s);
+    }
+    return connected_info;
+  }
+
   WS_PATH_LIST_BEGIN
   WS_PATH_ADD("/");
   WS_PATH_LIST_END
 private:
-  std::unordered_map<std::string, WebSocketConnectionPtr> _connection;
+  std::unordered_map<std::string, std::vector<WebSocketConnectionPtr>>
+      _connection;
   std::mutex _m;
 };
-
 class Server {
 protected:
   Queue<OwnedMessage, false> _message_in;
@@ -418,7 +411,7 @@ public:
 public:
   Server(uint16_t port)
       : _asio_acceptor(_asio_context,
-                      asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)) {
+                       asio::ip::tcp::endpoint(asio::ip::tcp::v4(), port)) {
     assert(server == nullptr);
     server = this;
   }
@@ -432,6 +425,21 @@ public:
             .addListener("0.0.0.0", 6868)
             .setThreadNum(4)
             .registerController(_websock)
+            .registerHandler(
+                "/GetConnectedInfo",
+                [this](
+                    const HttpRequestPtr &req,
+                    std::function<void(const HttpResponsePtr &)> &&callback) {
+                  auto resp = HttpResponse::newHttpJsonResponse(
+                      _websock->getConnectedInfo());
+                  resp->addHeader("Access-Control-Allow-Origin", "*");
+                  resp->addHeader("Access-Control-Allow-Methods", "GET, POST");
+                  resp->addHeader("Access-Control-Allow-Private-Network",
+                                  "true");
+                  resp->addHeader("Access-Control-Allow-Credentials", "true");
+                  callback(resp);
+                },
+                {Get})
             .run();
       });
       while (true) {

@@ -1,5 +1,7 @@
 {
     "cmake.configureSettings": {
-        "CMAKE_TOOLCHAIN_FILE": "/home/ubuntu/dev/git/vcpkg/vcpkg/scripts/buildsystems/vcpkg.cmake"
-    }
+        "CMAKE_MAKE_PROGRAM": "/home/linuxbrew/.linuxbrew/bin/ninja",
+        "CMAKE_TOOLCHAIN_FILE": "/home/zhaoyouya/tool/vcpkg/scripts/buildsystems/vcpkg.cmake"
+    },
+    "cmake.generator": "Ninja",
 }

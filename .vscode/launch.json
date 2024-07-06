@@ -2,7 +2,7 @@
     "configurations": [
         {
             "name": "Launch",
-            "type": "lldb",
+            "type": "cppdbg",
             "request": "launch",
             "program": "${workspaceFolder}/build/SilencedWebSocket",
             "args": [
